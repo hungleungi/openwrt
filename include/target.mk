@@ -28,7 +28,9 @@ DEFAULT_PACKAGES:=\
 	uci \
 	uclient-fetch \
 	urandom-seed \
-	urngd
+	urngd \
+	acme-dnsapi luci-app-ddns luci-app-acme luci-app-wol luci-app-udpxy luci-app-upnp luci-app-passwall luci-app-wireguard \
+	kmod-vmxnet3 luci-app-passwall_INCLUDE_ChinaDNS_NG luci-app-passwall_INCLUDE_https_dns_proxy
 
 ifneq ($(CONFIG_SELINUX),)
 DEFAULT_PACKAGES+=busybox-selinux procd-selinux
@@ -46,7 +48,7 @@ DEFAULT_PACKAGES.nas:=\
 	mdadm
 # For router targets
 DEFAULT_PACKAGES.router:=\
-	dnsmasq \
+	dnsmasq-full \
 	firewall \
 	ip6tables \
 	iptables \
