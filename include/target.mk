@@ -22,15 +22,12 @@ DEFAULT_PACKAGES:=\
 	libgcc \
 	libustream-wolfssl \
 	logd \
-	mtd \
 	netifd \
-	opkg \
 	uci \
 	uclient-fetch \
 	urandom-seed \
 	urngd \
-	acme-dnsapi luci-app-ddns luci-app-acme luci-app-wol luci-app-udpxy luci-app-upnp luci-app-passwall luci-app-wireguard \
-	kmod-vmxnet3 luci-app-passwall_INCLUDE_ChinaDNS_NG luci-app-passwall_INCLUDE_https_dns_proxy
+	luci-app-passwall luci-app-wireguard kmod-vmxnet3
 
 ifneq ($(CONFIG_SELINUX),)
 DEFAULT_PACKAGES+=busybox-selinux procd-selinux
@@ -42,7 +39,6 @@ endif
 DEFAULT_PACKAGES.basic:=
 # For nas targets
 DEFAULT_PACKAGES.nas:=\
-	block-mount \
 	fdisk \
 	lsblk \
 	mdadm
@@ -55,8 +51,6 @@ DEFAULT_PACKAGES.router:=\
 	kmod-ipt-offload \
 	odhcp6c \
 	odhcpd-ipv6only \
-	ppp \
-	ppp-mod-pppoe
 
 ifneq ($(DUMP),)
   all: dumpinfo
