@@ -331,6 +331,8 @@ hostapd_common_add_bss_config() {
 	config_add_array airtime_sta_weight
 	config_add_int airtime_bss_weight airtime_bss_limit
 
+	config_add_boolean multicast_to_unicast per_sta_vif
+
 	config_add_array hostapd_bss_options
 }
 
@@ -480,7 +482,8 @@ hostapd_set_bss_options() {
 		acct_server acct_secret acct_port acct_interval \
 		bss_load_update_period chan_util_avg_period sae_require_mfp \
 		multi_ap multi_ap_backhaul_ssid multi_ap_backhaul_key skip_inactivity_poll \
-		airtime_bss_weight airtime_bss_limit airtime_sta_weight
+		airtime_bss_weight airtime_bss_limit airtime_sta_weight \
+		multicast_to_unicast per_sta_vif
 
 	set_default isolate 0
 	set_default maxassoc 0
@@ -942,6 +945,16 @@ hostapd_set_bss_options() {
 		json_for_each_item append_operator_icon operator_icon
 	fi
 
+	set_default multicast_to_unicast 0
+	if [ "$multicast_to_unicast" -gt 0 ]; then
+		append bss_conf "multicast_to_unicast=$multicast_to_unicast" "$N"
+	fi
+
+	set_default per_sta_vif 0
+	if [ "$per_sta_vif" -gt 0 ]; then
+		append bss_conf "per_sta_vif=$per_sta_vif" "$N"
+	fi
+
 	json_get_values opts hostapd_bss_options
 	for val in $opts; do
 		append bss_conf "$val" "$N"
@@ -1379,18 +1392,18 @@ wpa_supplicant_run() {
 	_wpa_supplicant_common "$ifname"
 
 	ubus wait_for wpa_supplicant
-	local supplicant_pid=$(ubus call wpa_supplicant config_add "{ \
+	local supplicant_res="$(ubus call wpa_supplicant config_add "{ \
 		\"driver\": \"${_w_driver:-wext}\", \"ctrl\": \"$_rpath\", \
 		\"iface\": \"$ifname\", \"config\": \"$_config\" \
 		${network_bridge:+, \"bridge\": \"$network_bridge\"} \
 		${hostapd_ctrl:+, \"hostapd_ctrl\": \"$hostapd_ctrl\"} \
-		}" | jsonfilter -l 1 -e @.pid)
+		}")"
 
 	ret="$?"
 
-	[ "$ret" != 0 ] && wireless_setup_vif_failed WPA_SUPPLICANT_FAILED
+	[ "$ret" != 0 -o -z "$supplicant_res" ] && wireless_setup_vif_failed WPA_SUPPLICANT_FAILED
 
-	wireless_add_process "$supplicant_pid" "/usr/sbin/wpa_supplicant" 1 1
+	wireless_add_process "$(jsonfilter -s "$supplicant_res" -l 1 -e @.pid)" "/usr/sbin/wpa_supplicant" 1 1
 
 	return $ret
 }
