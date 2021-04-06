@@ -54,6 +54,8 @@
 #define WFI_FLAG_HAS_PMC		0x1
 #define WFI_FLAG_SUPPORTS_BTRM		0x2
 
+#define UBI_EC_HDR_MAGIC		0x55424923
+
 static int debug;
 
 struct bcm4908img_tail {
@@ -64,11 +66,22 @@ struct bcm4908img_tail {
 	uint32_t flags;
 };
 
-/* Info about BCM4908 image */
+/**
+ * struct bcm4908img_info - info about BCM4908 image
+ *
+ * Standard BCM4908 image consists of:
+ * 1. (Optional) vedor header
+ * 2. (Optional) cferom
+ * 3. bootfs  ─┐
+ * 4. padding  ├─ firmware
+ * 5. rootfs  ─┘
+ * 6. BCM4908 tail
+ */
 struct bcm4908img_info {
 	size_t file_size;
-	size_t vendor_header_size;	/* Vendor header size */
-	size_t cferom_size;
+	size_t cferom_offset;
+	size_t bootfs_offset;
+	size_t rootfs_offset;
 	uint32_t crc32;			/* Calculated checksum */
 	struct bcm4908img_tail tail;
 };
@@ -200,10 +213,11 @@ static int bcm4908img_calc_crc32(FILE *fp, struct bcm4908img_info *info) {
 	size_t length;
 	size_t bytes;
 
-	fseek(fp, info->vendor_header_size, SEEK_SET);
+	/* Start with cferom (or bootfs) - skip vendor header */
+	fseek(fp, info->cferom_offset, SEEK_SET);
 
 	info->crc32 = 0xffffffff;
-	length = info->file_size - info->vendor_header_size - sizeof(struct bcm4908img_tail);
+	length = info->file_size - info->cferom_offset - sizeof(struct bcm4908img_tail);
 	while (length && (bytes = fread(buf, 1, bcm4908img_min(sizeof(buf), length), fp)) > 0) {
 		info->crc32 = bcm4908img_crc32(info->crc32, buf, bytes);
 		length -= bytes;
@@ -263,14 +277,16 @@ static int bcm4908img_parse(FILE *fp, struct bcm4908img_info *info) {
 	}
 	chk = (void *)buf;
 	if (be32_to_cpu(chk->magic) == 0x2a23245e)
-		info->vendor_header_size = be32_to_cpu(chk->header_len);
+		info->cferom_offset = be32_to_cpu(chk->header_len);
 
-	/* Sizes */
+	/* Offsets */
 
-	for (; info->vendor_header_size + info->cferom_size <= info->file_size; info->cferom_size += 0x20000) {
-		if (fseek(fp, info->vendor_header_size + info->cferom_size, SEEK_SET)) {
+	for (info->bootfs_offset = info->cferom_offset;
+	     info->bootfs_offset < info->file_size;
+	     info->bootfs_offset += 0x20000) {
+		if (fseek(fp, info->bootfs_offset, SEEK_SET)) {
 			err = -errno;
-			fprintf(stderr, "Failed to fseek to the 0x%zx\n", info->cferom_size);
+			fprintf(stderr, "Failed to fseek to the 0x%zx\n", info->bootfs_offset);
 			return err;
 		}
 		if (fread(&tmp16, 1, sizeof(tmp16), fp) != sizeof(tmp16)) {
@@ -280,17 +296,43 @@ static int bcm4908img_parse(FILE *fp, struct bcm4908img_info *info) {
 		if (be16_to_cpu(tmp16) == 0x8519)
 			break;
 	}
-	if (info->vendor_header_size + info->cferom_size >= info->file_size) {
-		fprintf(stderr, "Failed to find cferom size (no bootfs found)\n");
+	if (info->bootfs_offset >= info->file_size) {
+		fprintf(stderr, "Failed to find bootfs offset\n");
+		return -EPROTO;
+	}
+
+	for (info->rootfs_offset = info->bootfs_offset;
+	     info->rootfs_offset < info->file_size;
+	     info->rootfs_offset += 0x20000) {
+		uint32_t magic;
+
+		if (fseek(fp, info->rootfs_offset, SEEK_SET)) {
+			err = -errno;
+			fprintf(stderr, "Failed to fseek: %d\n", err);
+			return err;
+		}
+
+		bytes = fread(&magic, 1, sizeof(magic), fp);
+		if (bytes != sizeof(magic)) {
+			fprintf(stderr, "Failed to read %zu bytes\n", sizeof(magic));
+			return -EIO;
+		}
+
+		if (be32_to_cpu(magic) == UBI_EC_HDR_MAGIC)
+			break;
+	}
+	if (info->rootfs_offset >= info->file_size) {
+		fprintf(stderr, "Failed to find rootfs offset\n");
 		return -EPROTO;
 	}
 
 	/* CRC32 */
 
-	fseek(fp, info->vendor_header_size, SEEK_SET);
+	/* Start with cferom (or bootfs) - skip vendor header */
+	fseek(fp, info->cferom_offset, SEEK_SET);
 
 	info->crc32 = 0xffffffff;
-	length = info->file_size - info->vendor_header_size - sizeof(*tail);
+	length = info->file_size - info->cferom_offset - sizeof(*tail);
 	while (length && (bytes = fread(buf, 1, bcm4908img_min(sizeof(buf), length), fp)) > 0) {
 		info->crc32 = bcm4908img_crc32(info->crc32, buf, bytes);
 		length -= bytes;
@@ -349,8 +391,10 @@ static int bcm4908img_info(int argc, char **argv) {
 		goto err_close;
 	}
 
-	printf("Vendor header length:\t%zu\n", info.vendor_header_size);
-	printf("cferom size:\t0x%zx\n", info.cferom_size);
+	if (info.bootfs_offset != info.cferom_offset)
+		printf("cferom offset:\t%zu\n", info.cferom_offset);
+	printf("bootfs offset:\t0x%zx\n", info.bootfs_offset);
+	printf("rootfs offset:\t0x%zx\n", info.rootfs_offset);
 	printf("Checksum:\t0x%08x\n", info.crc32);
 
 err_close:
@@ -536,15 +580,21 @@ static int bcm4908img_extract(int argc, char **argv) {
 	}
 
 	if (!strcmp(type, "cferom")) {
-		offset = 0;
-		length = info.cferom_size;
+		offset = info.cferom_offset;
+		length = info.bootfs_offset - offset;
 		if (!length) {
 			err = -ENOENT;
 			fprintf(stderr, "This BCM4908 image doesn't contain cferom\n");
 			goto err_close;
 		}
+	} else if (!strcmp(type, "bootfs")) {
+		offset = info.bootfs_offset;
+		length = info.rootfs_offset - offset;
+	} else if (!strcmp(type, "rootfs")) {
+		offset = info.rootfs_offset;
+		length = info.file_size - offset - sizeof(struct bcm4908img_tail);
 	} else if (!strcmp(type, "firmware")) {
-		offset = info.vendor_header_size + info.cferom_size;
+		offset = info.bootfs_offset;
 		length = info.file_size - offset - sizeof(struct bcm4908img_tail);
 	} else {
 		err = -EINVAL;
@@ -648,7 +698,7 @@ static int bcm4908img_bootfs_ls(FILE *fp, struct bcm4908img_info *info) {
 	size_t bytes;
 	int err = 0;
 
-	for (offset = info->vendor_header_size + info->cferom_size; ; offset += (je32_to_cpu(node.totlen) + 0x03) & ~0x03) {
+	for (offset = info->bootfs_offset; ; offset += (je32_to_cpu(node.totlen) + 0x03) & ~0x03) {
 		char name[FILENAME_MAX + 1];
 
 		if (fseek(fp, offset, SEEK_SET)) {
@@ -719,7 +769,7 @@ static int bcm4908img_bootfs_mv(FILE *fp, struct bcm4908img_info *info, int argc
 		return -EINVAL;
 	}
 
-	for (offset = info->vendor_header_size + info->cferom_size; ; offset += (je32_to_cpu(node.totlen) + 0x03) & ~0x03) {
+	for (offset = info->bootfs_offset; ; offset += (je32_to_cpu(node.totlen) + 0x03) & ~0x03) {
 		char name[FILENAME_MAX];
 		uint32_t crc32;
 
